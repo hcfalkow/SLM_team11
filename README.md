@@ -98,7 +98,7 @@ This script trains the Small Language Model from scratch.
 
 Run this script using:
 ```bash
-python src/prompt.py
+python src/train.py
 ```
 
 ### Tunable parameters
