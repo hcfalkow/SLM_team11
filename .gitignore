@@ -4,3 +4,5 @@ __pycache__/
 /data/val.bin
 /data/input.txt
 /out
+.DS_Store
+settings.json
