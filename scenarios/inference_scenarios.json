@@ -1,0 +1,63 @@
+{
+  "phase": "inference",
+  "defaults": {
+    "device": "cpu",
+    "dtype": "float32",
+    "max_new_tokens": 200,
+    "temperature": 1.0,
+    "top_k": 50,
+    "prompt_workload_file": "scenarios/prompts.txt",
+    "codecarbon_offline": true,
+    "country_iso_code": "SWE"
+  },
+  "invariants": {
+    "prompt_workload": "fixed prompts file reused across comparable scenarios",
+    "output_length_rule": "max_new_tokens fixed except explicit length scenario"
+  },
+  "scenarios": [
+    {
+      "id": "infer_baseline",
+      "description": "Repository default prompting setup as baseline.",
+      "overrides": {}
+    },
+    {
+      "id": "infer_low_temperature",
+      "description": "Lower temperature with same fixed output length and workload.",
+      "overrides": {
+        "temperature": 0.7,
+        "top_k": 40
+      }
+    },
+    {
+      "id": "infer_high_temperature",
+      "description": "Higher temperature with same fixed output length and workload.",
+      "overrides": {
+        "temperature": 1.2,
+        "top_k": 80
+      }
+    },
+    {
+      "id": "infer_length_temperature_variant",
+      "description": "Intentional comparability exception: change output length and temperature together.",
+      "overrides": {
+        "max_new_tokens": 300,
+        "temperature": 0.8
+      }
+    },
+    {
+      "id": "infer_dtype_bfloat16",
+      "description": "Mixed precision inference scenario (requires CUDA bfloat16 support).",
+      "overrides": {
+        "dtype": "bfloat16",
+        "device": "cuda"
+      }
+    },
+    {
+      "id": "infer_device_cpu",
+      "description": "CPU-only inference scenario.",
+      "overrides": {
+        "device": "cpu"
+      }
+    }
+  ]
+}

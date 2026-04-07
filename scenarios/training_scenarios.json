@@ -1,0 +1,80 @@
+{
+  "phase": "train",
+  "defaults": {
+    "eval_interval": 200,
+    "eval_iters": 50,
+    "log_interval": 50,
+    "save_checkpoint": true,
+    "seed": 1,
+    "device": "cpu",
+    "dtype": "float32",
+    "batch_size": 32,
+    "block_size": 256,
+    "max_iters": 2000,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.1,
+    "grad_clip": 1.0,
+    "n_layer": 4,
+    "n_head": 4,
+    "n_embd": 128,
+    "dropout": 0.1,
+    "bias": true,
+    "early_stopping": true,
+    "early_stopping_patience": 4,
+    "early_stopping_min_delta": 0.0,
+    "early_stopping_min_evals": 3,
+    "codecarbon_offline": true,
+    "country_iso_code": "SWE"
+  },
+  "invariants": {
+    "data_dir": "data",
+    "dataset_split": "fixed prepare.py output",
+    "loss_function": "cross_entropy",
+    "evaluation_procedure": "estimate_loss(train+val, eval_interval/eval_iters)"
+  },
+  "scenarios": [
+    {
+      "id": "train_baseline",
+      "description": "Repository default training setup as baseline.",
+      "overrides": {}
+    },
+    {
+      "id": "train_model_smaller",
+      "description": "Smaller model for compute/emissions comparison.",
+      "overrides": {
+        "n_layer": 2,
+        "n_embd": 96
+      }
+    },
+    {
+      "id": "train_model_larger",
+      "description": "Larger model for compute/emissions comparison.",
+      "overrides": {
+        "n_layer": 6,
+        "n_embd": 192
+      }
+    },
+    {
+      "id": "train_blocksize_128",
+      "description": "Shorter context window with fixed other defaults.",
+      "overrides": {
+        "block_size": 128
+      }
+    },
+    {
+      "id": "train_dtype_bfloat16",
+      "description": "Mixed precision scenario (requires CUDA bfloat16 support).",
+      "overrides": {
+        "dtype": "bfloat16",
+        "device": "cuda"
+      }
+    },
+    {
+      "id": "train_device_cpu",
+      "description": "CPU-only training scenario.",
+      "overrides": {
+        "device": "cpu"
+      }
+    }
+  ]
+}

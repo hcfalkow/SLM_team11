@@ -38,10 +38,10 @@ conda activate slm-sustainability
 ## General workflow
 
 1. Prepare the dataset  
-2. Run the model arquitecture
+2. Review predefined scenarios and invariants
 3. Train the language model  
 4. Run inference (prompting)  
-5. Quantify sustainability impacts  
+5. Quantify sustainability impacts using structured outputs  
 
 Each step is described below.
 
@@ -101,6 +101,12 @@ Run this script using:
 python src/train.py
 ```
 
+The script supports scenario/CLI configuration and writes each execution to:
+
+```text
+out/runs/train/<scenario_id>/<run_id>/
+```
+
 ### Tunable parameters
 
 At the top of `train.py`, you will find a configuration section where you can adjust parameters such as:
@@ -129,10 +135,21 @@ These parameters are the **main levers** you should use for:
 
 ### Where to implement CodeCarbon (training)
 
-You must integrate **CodeCarbon** in this file to measure:
+CodeCarbon is integrated around the training scope (including periodic validation) to measure:
 
 - Energy consumption  
 - CO₂-equivalent emissions during training  
+
+### Early stopping (training)
+
+A simple validation-based early stopping option is included and configurable:
+
+- `--early-stopping` (true/false)
+- `--early-stopping-patience`
+- `--early-stopping-min-delta`
+- `--early-stopping-min-evals`
+
+The stop reason and stopping iteration are logged in run metadata and summary tables.
 
 ---
 
@@ -148,7 +165,7 @@ This script performs **inference** using a trained model checkpoint.
 It:
 
 - Loads the trained model  
-- Accepts a text prompt  
+- Accepts either a single prompt or a fixed prompt workload file  
 - Generates new tokens autoregressively  
 
 ### Tunable parameters
@@ -166,10 +183,84 @@ These parameters control the **inference workload**, which is essential for:
 
 ### Where to implement CodeCarbon (inference)
 
-You must also integrate **CodeCarbon** in this file to measure:
+CodeCarbon is integrated around the generation scope (not checkpoint/model loading) to measure:
 
 - Energy and emissions per prompt  
 - Energy and emissions as a function of generated tokens  
+
+---
+
+## Scenario-driven setup (small and predefined)
+
+This repository now includes a lightweight scenario layer intended for narrow, fair comparisons.
+
+- Training scenarios: `scenarios/training_scenarios.json`
+- Inference scenarios: `scenarios/inference_scenarios.json`
+- Fixed reusable inference workload: `scenarios/prompts.txt`
+- Runner for one scenario or full sweep: `main.py`
+
+### Comparison invariants
+
+Unless explicitly varied by a scenario, these stay fixed and are logged:
+
+- dataset and split
+- evaluation procedure (`eval_interval`, `eval_iters`)
+- prompt workload file for inference
+- inference output length (`max_new_tokens`) for comparable inference scenarios
+- software/hardware context metadata
+
+`infer_length_temperature_variant` is the explicit exception that changes output length.
+
+### Run commands
+
+List scenarios:
+
+```bash
+python main.py list --phase all
+```
+
+Run one training scenario:
+
+```bash
+python main.py run --phase train --scenario-id train_baseline
+```
+
+Run one inference scenario:
+
+```bash
+python main.py run --phase inference --scenario-id infer_baseline --checkpoint-path out/ckpt.pt
+```
+
+Run full sweeps:
+
+```bash
+python main.py sweep --phase train --skip-if-complete
+python main.py sweep --phase inference --checkpoint-path out/ckpt.pt --skip-if-complete
+```
+
+Optional per-run overrides can still be passed while staying scenario-first:
+
+```bash
+python main.py run --phase train --scenario-id train_baseline --extra --max-iters 1200 --learning-rate 2e-4
+```
+
+### Outputs for downstream analysis
+
+Each scenario run produces machine-readable artifacts:
+
+- `effective_config.json`
+- `run_metadata.json`
+- `emissions.csv`
+- `train_metrics.csv` (training only)
+- `generated_outputs.jsonl` (inference only)
+- `ckpt.pt` (training only)
+
+Aggregate CSV tables are appended to:
+
+- `out/scenario_summaries/train_summary.csv`
+- `out/scenario_summaries/inference_summary.csv`
+
+These summaries combine configuration, runtime, workload size, and energy/emissions values.
 
 ---
 
