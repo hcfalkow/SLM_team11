@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.4.4",
     "pandas>=3.0.2",
     "requests>=2.33.1",
+    "ruff>=0.15.9",
     "torch>=2.10",
     "torchaudio>=2.11.0",
     "torchinfo>=1.8",

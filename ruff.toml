@@ -1,0 +1,46 @@
+target-version = "py312"
+line-length = 120
+unsafe-fixes = false
+
+extend-exclude = [
+  ".git",
+  ".hg",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "build",
+  "dist",
+  ".ipynb_checkpoints",
+]
+
+[lint]
+# E/F/W: pycodestyle/pyflakes; I: isort
+# UP: pyupgrade (modern Python idioms)
+# B: bugbear (likely bugs / bad patterns)
+# C90: complexity (mccabe)
+# SIM: simplify (unnecessary constructs)
+# ARG: unused args (esp. in lambdas / funcs)
+# PTH: pathlib over os.path suggestions
+# RET: return-related consistency
+# RUF: Ruff-specific improvements (incl. unused noqa, etc.)
+select = ["E", "F", "W", "I", "UP", "B", "C90", "SIM", "ARG", "PTH", "RET", "RUF", "C4"]
+
+preview = false
+
+[lint.isort]
+combine-as-imports = true
+force-sort-within-sections = false
+known-first-party = ["detgpt"]
+known-third-party = ["wandb"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[lint.per-file-ignores]
+"tests/**" = ["S101", "D"]
+"**/migrations/*.py" = ["E", "F", "W", "I", "UP", "B"]

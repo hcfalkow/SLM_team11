@@ -19,7 +19,7 @@ class GPTConfig:
     block_size: int = 256
     vocab_size: int = 50304
 
-    # model size (These are the main tunables you'll 
+    # model size (These are the main tunables you'll
     #             experiment with in the train.py)
     n_layer: int = 4
     n_head: int = 4
@@ -72,8 +72,7 @@ class CausalSelfAttention(nn.Module):
         y = att @ v  # (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # (B, T, C)
 
-        y = self.resid_dropout(self.proj(y))
-        return y
+        return self.resid_dropout(self.proj(y))
 
 
 class MLP(nn.Module):
@@ -87,9 +86,7 @@ class MLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc(x)
         x = F.gelu(x)
-        x = self.proj(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(self.proj(x))
 
 
 class Block(nn.Module):
@@ -102,8 +99,7 @@ class Block(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
-        return x
+        return x + self.mlp(self.ln2(x))
 
 
 class GPT(nn.Module):
@@ -136,8 +132,8 @@ class GPT(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
-        B, T = idx.size()
-        if T > self.config.block_size:
+        _, T = idx.size()
+        if self.config.block_size < T:
             raise ValueError(f"Sequence length {T} exceeds block_size {self.config.block_size}")
 
         pos = torch.arange(0, T, device=idx.device, dtype=torch.long)  # (T,)

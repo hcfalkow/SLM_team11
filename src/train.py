@@ -8,23 +8,22 @@ Focus:
 Source: https://github.com/karpathy/nanoGPT
 """
 
-import os
-import time
 import pickle
+import time
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import torch
 
-from model import GPTConfig, GPT
+from model import GPT, GPTConfig
+from paths import DATA_DIR, OUT_DIR
 
 # -----------------------------------------------------------------------------
 # Experiment configuration
 
 # I/O
-OUT_DIR = "out"
-DATA_DIR = os.path.join("data")
-EVAL_INTERVAL = 200     
+EVAL_INTERVAL = 200
 EVAL_ITERS = 50
 LOG_INTERVAL = 50
 SAVE_CHECKPOINT = True
@@ -38,11 +37,14 @@ BIAS = True
 
 # Training (main parameters you can also experiment with)
 SEED = 1
-DEVICE = "cpu"          # If you can, try also seeing consumption when using gpu (change this to 'cuda' if torch.cuda.is_available() else 'cpu')
-DTYPE = "float32"       
+DEVICE = "cpu"          # Try GPU too if available:
+# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE = "float32"
 BATCH_SIZE = 32         # Number of sequences processed in parallel.
-BLOCK_SIZE = 256        # Maximum context length for predictions (e.g. 128 or 256). The longer the block size, the more memory and compute it requires, but it can also lead to better performance.
-MAX_ITERS = 2000        # Total number of training iterations. The more iterations, the better the model can perform, but it also takes more time and energy to train.
+BLOCK_SIZE = 256        # Maximum context length for predictions (e.g. 128 or 256).
+# Larger block sizes need more memory/compute, but can improve performance.
+MAX_ITERS = 2000        # Total number of training iterations.
+# More iterations can improve quality, but cost more time and energy.
 LEARNING_RATE = 3e-4    # the standard starting learning rate, often good enough for a first try
 WEIGHT_DECAY = 0.1      # L2 Regularization
 GRAD_CLIP = 1.0         # To prevent exploding gradients
@@ -53,16 +55,16 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-def load_meta(data_dir: str):
-    meta_path = os.path.join(data_dir, "meta.pkl")
-    if not os.path.exists(meta_path):
+def load_meta(data_dir: str | Path):
+    meta_path = Path(data_dir) / "meta.pkl"
+    if not meta_path.exists():
         return None
-    with open(meta_path, "rb") as f:
+    with meta_path.open("rb") as f:
         return pickle.load(f)
 
-def get_batch(split: str, data_dir: str, block_size: int, batch_size: int, device: str):
+def get_batch(split: str, data_dir: str | Path, block_size: int, batch_size: int, device: str):
     # simple, robust memmap loader
-    bin_path = os.path.join(data_dir, f"{split}.bin")
+    bin_path = Path(data_dir) / f"{split}.bin"
     data = np.memmap(bin_path, dtype=np.uint16, mode="r")
 
     ix = torch.randint(len(data) - block_size - 1, (batch_size,))
@@ -74,7 +76,7 @@ def get_batch(split: str, data_dir: str, block_size: int, batch_size: int, devic
     return x, y
 
 @torch.no_grad()
-def estimate_loss(model: GPT, data_dir: str, block_size: int, batch_size: int, device: str, eval_iters: int):
+def estimate_loss(model: GPT, data_dir: str | Path, block_size: int, batch_size: int, device: str, eval_iters: int):
     model.eval()
     losses = {}
     for split in ["train", "val"]:
@@ -88,17 +90,18 @@ def estimate_loss(model: GPT, data_dir: str, block_size: int, batch_size: int, d
     return losses
 
 def save_checkpoint(out_dir: str, model: GPT, optimizer: torch.optim.Optimizer, iter_num: int, config: dict):
-    os.makedirs(out_dir, exist_ok=True)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
     ckpt = {
         "iter_num": iter_num,
         "model_state": model.state_dict(),
         "optim_state": optimizer.state_dict(),
         "config": config,
     }
-    torch.save(ckpt, os.path.join(out_dir, "ckpt.pt"))
+    torch.save(ckpt, out_path / "ckpt.pt")
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     set_seed(SEED)
 
     meta = load_meta(DATA_DIR)
