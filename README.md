@@ -64,7 +64,7 @@ It performs the following steps:
 Run this script **once** before training:
 
 ```bash
-python data/prepare.py
+uv run data/prepare.py
 ```
 
 You are **not required to modify** this file.
@@ -98,7 +98,7 @@ This script trains the Small Language Model from scratch.
 
 Run this script using:
 ```bash
-python src/train.py
+uv run src/train.py
 ```
 
 The script supports scenario/CLI configuration and writes each execution to:
@@ -140,15 +140,15 @@ CodeCarbon is integrated around the training scope (including periodic validatio
 - Energy consumption  
 - CO₂-equivalent emissions during training  
 
-### Early stopping (training)
+### Validation threshold stopping (training)
 
-A simple validation-based early stopping option is included and configurable:
+A validation-loss threshold stop option is included and configurable:
 
-- `--early-stopping` (true/false)
-- `--early-stopping-patience`
-- `--early-stopping-min-delta`
-- `--early-stopping-min-evals`
+- `--val-threshold-stopping` (true/false)
+- `--val-loss-threshold`
+- `--val-threshold-min-evals`
 
+Training stops when validation loss is below the configured threshold after the minimum number of evaluations.
 The stop reason and stopping iteration are logged in run metadata and summary tables.
 
 ---
@@ -157,7 +157,7 @@ The stop reason and stopping iteration are logged in run metadata and summary ta
 
 Run this script using:
 ```bash
-python src/prompt.py
+uv run src/prompt.py
 ```
 
 This script performs **inference** using a trained model checkpoint.
@@ -209,39 +209,44 @@ Unless explicitly varied by a scenario, these stay fixed and are logged:
 - inference output length (`max_new_tokens`) for comparable inference scenarios
 - software/hardware context metadata
 
-`infer_length_temperature_variant` is the explicit exception that changes output length.
-
 ### Run commands
 
 List scenarios:
 
 ```bash
-python main.py list --phase all
+uv run main.py list --phase all
 ```
 
 Run one training scenario:
 
 ```bash
-python main.py run --phase train --scenario-id train_baseline
+uv run main.py run --phase train --scenario-id train_baseline
 ```
 
 Run one inference scenario:
 
 ```bash
-python main.py run --phase inference --scenario-id infer_baseline --checkpoint-path out/ckpt.pt
+uv run main.py run --phase inference --scenario-id infer_baseline
 ```
 
 Run full sweeps:
 
 ```bash
-python main.py sweep --phase train --skip-if-complete
-python main.py sweep --phase inference --checkpoint-path out/ckpt.pt --skip-if-complete
+uv run main.py sweep --phase train --skip-if-complete
+uv run main.py sweep --phase inference --skip-if-complete
 ```
+
+Inference checkpoint resolution order:
+
+- Use `--checkpoint-path` if provided and the file exists.
+- Otherwise use `model_training_scenario_id` from `scenarios/inference_scenarios.json` and load
+  checkpoint path from `out/runs/train/<model_training_scenario_id>/latest_run.json`.
+- If the checkpoint cannot be resolved, the inference scenario is skipped with a warning.
 
 Optional per-run overrides can still be passed while staying scenario-first:
 
 ```bash
-python main.py run --phase train --scenario-id train_baseline --extra --max-iters 1200 --learning-rate 2e-4
+uv run main.py run --phase train --scenario-id train_baseline --extra --max-iters 1200 --learning-rate 2e-4
 ```
 
 ### Outputs for downstream analysis

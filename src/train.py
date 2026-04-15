@@ -36,7 +36,7 @@ DEFAULT_BIAS = True
 
 # Training (main parameters you can also experiment with)
 DEFAULT_SEED = 1
-DEFAULT_DEVICE = "cpu"
+DEFAULT_DEVICE = "cuda"
 DEFAULT_DTYPE = "float32"
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_BLOCK_SIZE = 256
@@ -45,11 +45,10 @@ DEFAULT_LEARNING_RATE = 3e-4
 DEFAULT_WEIGHT_DECAY = 0.1
 DEFAULT_GRAD_CLIP = 1.0
 
-# Early stopping (validation-based)
-DEFAULT_EARLY_STOPPING = True
-DEFAULT_EARLY_STOPPING_PATIENCE = 4
-DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
-DEFAULT_EARLY_STOPPING_MIN_EVALS = 3
+# Validation threshold stopping
+DEFAULT_VAL_THRESHOLD_STOPPING = True
+DEFAULT_VAL_LOSS_THRESHOLD = 2.3
+DEFAULT_VAL_THRESHOLD_MIN_EVALS = 1
 
 # -----------------------------------------------------------------------------
 
@@ -96,10 +95,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=DEFAULT_WEIGHT_DECAY)
     parser.add_argument("--grad-clip", type=float, default=DEFAULT_GRAD_CLIP)
 
-    parser.add_argument("--early-stopping", type=parse_bool, default=DEFAULT_EARLY_STOPPING)
-    parser.add_argument("--early-stopping-patience", type=int, default=DEFAULT_EARLY_STOPPING_PATIENCE)
-    parser.add_argument("--early-stopping-min-delta", type=float, default=DEFAULT_EARLY_STOPPING_MIN_DELTA)
-    parser.add_argument("--early-stopping-min-evals", type=int, default=DEFAULT_EARLY_STOPPING_MIN_EVALS)
+    parser.add_argument("--val-threshold-stopping", type=parse_bool, default=DEFAULT_VAL_THRESHOLD_STOPPING)
+    parser.add_argument("--val-loss-threshold", type=float, default=DEFAULT_VAL_LOSS_THRESHOLD)
+    parser.add_argument("--val-threshold-min-evals", type=int, default=DEFAULT_VAL_THRESHOLD_MIN_EVALS)
 
     parser.add_argument("--codecarbon-offline", type=parse_bool, default=True)
     parser.add_argument("--country-iso-code", type=str, default="SWE")
@@ -188,6 +186,48 @@ def load_emissions_metrics(emissions_csv: Path) -> dict[str, float | None]:
     return {"energy_kwh": energy_kwh, "emissions_kg": emissions_kg}
 
 
+def collect_model_stats(model: torch.nn.Module) -> dict[str, int | float]:
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    non_trainable_params = total_params - trainable_params
+    parameter_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    buffer_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+    state_dict_bytes = parameter_bytes + buffer_bytes
+    return {
+        "total_params": int(total_params),
+        "trainable_params": int(trainable_params),
+        "non_trainable_params": int(non_trainable_params),
+        "parameter_bytes": int(parameter_bytes),
+        "buffer_bytes": int(buffer_bytes),
+        "state_dict_bytes_estimate": int(state_dict_bytes),
+        "state_dict_mb_estimate": round(state_dict_bytes / (1024**2), 4),
+    }
+
+
+def cuda_memory_stats(device: str) -> dict[str, float | int | str | None]:
+    if not (torch.cuda.is_available() and str(device).startswith("cuda")):
+        return {
+            "device": str(device),
+            "gpu_name": None,
+            "peak_allocated_bytes": None,
+            "peak_allocated_mb": None,
+            "peak_reserved_bytes": None,
+            "peak_reserved_mb": None,
+        }
+
+    cuda_device = torch.device(device)
+    allocated_bytes = int(torch.cuda.max_memory_allocated(cuda_device))
+    reserved_bytes = int(torch.cuda.max_memory_reserved(cuda_device))
+    return {
+        "device": str(device),
+        "gpu_name": torch.cuda.get_device_name(cuda_device),
+        "peak_allocated_bytes": allocated_bytes,
+        "peak_allocated_mb": round(allocated_bytes / (1024**2), 4),
+        "peak_reserved_bytes": reserved_bytes,
+        "peak_reserved_mb": round(reserved_bytes / (1024**2), 4),
+    }
+
+
 def main():  # noqa: C901
     args = parse_args()
 
@@ -218,6 +258,7 @@ def main():  # noqa: C901
 
     # create the model and move it to the device
     model = GPT(cfg).to(args.device)
+    model_stats = collect_model_stats(model)
 
     ptdtype = {
         "float32": torch.float32,
@@ -266,11 +307,10 @@ def main():  # noqa: C901
             "grad_clip": args.grad_clip,
             "save_checkpoint": args.save_checkpoint,
         },
-        "early_stopping": {
-            "enabled": args.early_stopping,
-            "patience": args.early_stopping_patience,
-            "min_delta": args.early_stopping_min_delta,
-            "min_evals": args.early_stopping_min_evals,
+        "validation_threshold_stopping": {
+            "enabled": args.val_threshold_stopping,
+            "val_loss_threshold": args.val_loss_threshold,
+            "min_evals": args.val_threshold_min_evals,
         },
         "model": asdict(cfg),
     }
@@ -296,7 +336,9 @@ def main():  # noqa: C901
     last_eval_losses: dict[str, float] = {"train": float("nan"), "val": float("nan")}
     stop_reason = "max_iters_reached"
     eval_count = 0
-    no_improve_count = 0
+
+    if torch.cuda.is_available() and args.device.startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(torch.device(args.device))
 
     tracker.start()
     t0 = time.time()
@@ -317,13 +359,12 @@ def main():  # noqa: C901
             eval_count += 1
             last_eval_losses = losses
 
-            improved = losses["val"] < (best_val_loss - args.early_stopping_min_delta)
+            improved = losses["val"] < best_val_loss
             if improved:
                 best_val_loss = losses["val"]
                 best_iter = it
-                no_improve_count = 0
-            else:
-                no_improve_count += 1
+
+            threshold_reached = losses["val"] <= args.val_loss_threshold
 
             append_row(
                 metrics_csv,
@@ -334,7 +375,8 @@ def main():  # noqa: C901
                     "elapsed_seconds": round(elapsed_s, 4),
                     "best_val_loss": best_val_loss,
                     "best_iter": best_iter,
-                    "no_improve_evals": no_improve_count,
+                    "val_loss_threshold": args.val_loss_threshold,
+                    "threshold_reached": threshold_reached,
                 },
             )
 
@@ -358,14 +400,14 @@ def main():  # noqa: C901
                 save_checkpoint(checkpoint_path, model, optimizer, it, config_dump)
 
             if (
-                args.early_stopping
-                and eval_count >= args.early_stopping_min_evals
-                and no_improve_count >= args.early_stopping_patience
+                args.val_threshold_stopping
+                and eval_count >= args.val_threshold_min_evals
+                and threshold_reached
                 and it > 0
             ):
                 stop_reason = (
-                    f"early_stopping(no_improve_evals={no_improve_count}, "
-                    f"patience={args.early_stopping_patience}, min_delta={args.early_stopping_min_delta})"
+                    f"validation_threshold_reached(val_loss={losses['val']:.6f}, "
+                    f"threshold={args.val_loss_threshold}, min_evals={args.val_threshold_min_evals})"
                 )
                 print(f"Stopping early at iter {it}: {stop_reason}")
                 break
@@ -410,6 +452,10 @@ def main():  # noqa: C901
         }
         save_checkpoint(checkpoint_path, model, optimizer, last_iter, config_dump)
 
+    checkpoint_size_bytes = checkpoint_path.stat().st_size if checkpoint_path.exists() else None
+    checkpoint_size_mb = round(checkpoint_size_bytes / (1024**2), 4) if checkpoint_size_bytes is not None else None
+    gpu_memory = cuda_memory_stats(args.device)
+
     emissions_metrics = load_emissions_metrics(emissions_csv)
 
     run_metadata = {
@@ -424,17 +470,22 @@ def main():  # noqa: C901
         "device": args.device,
         "dtype": args.dtype,
         "model": asdict(cfg),
+        "model_stats": {
+            **model_stats,
+            "checkpoint_size_bytes": checkpoint_size_bytes,
+            "checkpoint_size_mb": checkpoint_size_mb,
+        },
+        "gpu_memory": gpu_memory,
         "optimizer": {
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
             "grad_clip": args.grad_clip,
             "betas": [0.9, 0.95],
         },
-        "early_stopping": {
-            "enabled": args.early_stopping,
-            "patience": args.early_stopping_patience,
-            "min_delta": args.early_stopping_min_delta,
-            "min_evals": args.early_stopping_min_evals,
+        "validation_threshold_stopping": {
+            "enabled": args.val_threshold_stopping,
+            "val_loss_threshold": args.val_loss_threshold,
+            "min_evals": args.val_threshold_min_evals,
             "best_val_loss": best_val_loss,
             "best_iter": best_iter,
             "eval_count": eval_count,
@@ -501,10 +552,16 @@ def main():  # noqa: C901
             "max_iters": args.max_iters,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
-            "early_stopping": args.early_stopping,
-            "early_stopping_patience": args.early_stopping_patience,
-            "early_stopping_min_delta": args.early_stopping_min_delta,
+            "val_threshold_stopping": args.val_threshold_stopping,
+            "val_loss_threshold": args.val_loss_threshold,
+            "val_threshold_min_evals": args.val_threshold_min_evals,
             "runtime_seconds": round(runtime_seconds, 4),
+            "model_total_params": model_stats["total_params"],
+            "model_trainable_params": model_stats["trainable_params"],
+            "model_state_dict_mb_estimate": model_stats["state_dict_mb_estimate"],
+            "checkpoint_size_mb": checkpoint_size_mb,
+            "gpu_peak_allocated_mb": gpu_memory["peak_allocated_mb"],
+            "gpu_peak_reserved_mb": gpu_memory["peak_reserved_mb"],
             "best_val_loss": best_val_loss,
             "final_val_loss": last_eval_losses["val"],
             "energy_kwh": emissions_metrics["energy_kwh"],

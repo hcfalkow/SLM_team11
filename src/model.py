@@ -159,10 +159,15 @@ class GPT(nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int | None = None,
+        context_window: int | None = None,
     ) -> torch.Tensor:
         self.eval()
+        if context_window is not None and context_window <= 0:
+            raise ValueError(f"context_window must be > 0, got {context_window}")
+        effective_window = min(context_window, self.config.block_size) if context_window is not None else self.config.block_size
+
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.config.block_size :]  # crop context
+            idx_cond = idx[:, -effective_window:]  # crop context
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / temperature
 

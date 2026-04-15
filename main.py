@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 from src.paths import PROJECT_ROOT, scenario_runs_dir
 
@@ -78,13 +79,78 @@ def scenario_is_complete(phase: str, scenario_id: str) -> bool:
     return latest.get("status") == "completed"
 
 
+def _resolve_path(path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+def _resolve_training_checkpoint_from_latest(training_scenario_id: str) -> tuple[str | None, str | None]:
+    latest_path = scenario_runs_dir("train", training_scenario_id) / "latest_run.json"
+    if not latest_path.exists():
+        return None, f"missing latest run metadata: {latest_path}"
+
+    with latest_path.open("r", encoding="utf-8") as f:
+        latest = json.load(f)
+
+    if latest.get("status") != "completed":
+        return None, f"latest training run is not completed for scenario '{training_scenario_id}'"
+
+    checkpoint_path = latest.get("checkpoint_path")
+    if not isinstance(checkpoint_path, str) or not checkpoint_path.strip():
+        return None, (
+            f"latest run metadata for training scenario '{training_scenario_id}' does not include checkpoint_path"
+        )
+
+    resolved_checkpoint = _resolve_path(checkpoint_path)
+    if not resolved_checkpoint.exists():
+        return None, f"checkpoint referenced in latest run metadata does not exist: {resolved_checkpoint}"
+
+    return str(resolved_checkpoint), str(latest_path)
+
+
+def _apply_inference_checkpoint(
+    *,
+    merged: dict,
+    phase: str,
+    scenario_id: str,
+    checkpoint_path: str | None,
+) -> tuple[dict | None, str | None]:
+    merged_config = dict(merged)
+    merged_model_scenario_id = merged_config.pop("model_training_scenario_id", None)
+
+    if checkpoint_path:
+        resolved_checkpoint = _resolve_path(checkpoint_path)
+        if not resolved_checkpoint.exists():
+            return None, f"checkpoint argument does not exist: {resolved_checkpoint}"
+        merged_config["checkpoint_path"] = str(resolved_checkpoint)
+        return merged_config, None
+
+    if not isinstance(merged_model_scenario_id, str) or not merged_model_scenario_id.strip():
+        return None, (
+            "inference scenario is missing model_training_scenario_id and no --checkpoint-path override was provided"
+        )
+
+    resolved_checkpoint, latest_source = _resolve_training_checkpoint_from_latest(merged_model_scenario_id)
+    if resolved_checkpoint is None:
+        return None, (
+            f"unable to resolve checkpoint from training scenario '{merged_model_scenario_id}': {latest_source}"
+        )
+
+    print(
+        f"Using checkpoint for {phase}:{scenario_id} from training scenario "
+        f"'{merged_model_scenario_id}': {resolved_checkpoint} (source: {latest_source})"
+    )
+    merged_config["checkpoint_path"] = resolved_checkpoint
+    return merged_config, None
+
+
 def build_command(
     phase: str,
     scenario_id: str,
     run_id: str | None,
     checkpoint_path: str | None,
     extra: list[str],
-) -> list[str]:
+) -> tuple[list[str] | None, str | None]:
     phase_config, scenario = get_scenario(phase, scenario_id)
     defaults = phase_config.get("defaults", {})
     overrides = scenario.get("overrides", {})
@@ -92,19 +158,25 @@ def build_command(
     if phase == "inference":
         default_length = defaults.get("max_new_tokens")
         override_length = overrides.get("max_new_tokens", default_length)
-        if scenario_id != "infer_length_temperature_variant" and override_length != default_length:
+        if override_length != default_length:
             raise ValueError(
-                "Inference comparability guard: max_new_tokens can only differ in infer_length_temperature_variant."
+                "Inference comparability guard: max_new_tokens must remain fixed across predefined scenarios."
             )
 
     merged = {**defaults, **overrides}
+    if phase == "inference":
+        merged, skip_reason = _apply_inference_checkpoint(
+            merged=merged,
+            phase=phase,
+            scenario_id=scenario_id,
+            checkpoint_path=checkpoint_path,
+        )
+        if merged is None:
+            return None, skip_reason
 
     cmd = [sys.executable, str(SCRIPT_BY_PHASE[phase]), "--scenario-id", scenario_id]
     if run_id:
         cmd.extend(["--run-id", run_id])
-
-    if phase == "inference" and checkpoint_path:
-        merged["checkpoint_path"] = checkpoint_path
 
     for key, value in merged.items():
         flag = f"--{key.replace('_', '-')}"
@@ -113,7 +185,7 @@ def build_command(
     if extra:
         cmd.extend(extra)
 
-    return cmd
+    return cmd, None
 
 
 def run_one(
@@ -130,7 +202,11 @@ def run_one(
         print(f"Skipping {phase}:{scenario_id} (already completed).")
         return 0
 
-    cmd = build_command(phase, scenario_id, resolved_run_id, checkpoint_path, extra)
+    cmd, skip_reason = build_command(phase, scenario_id, resolved_run_id, checkpoint_path, extra)
+    if cmd is None:
+        print(f"Warning: Skipping {phase}:{scenario_id} ({skip_reason})")
+        return 0
+
     print("Running:", " ".join(cmd))
     result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False, capture_output=True, text=True)
 

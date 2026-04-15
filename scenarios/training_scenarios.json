@@ -1,14 +1,14 @@
 {
   "phase": "train",
   "defaults": {
-    "eval_interval": 200,
+    "eval_interval": 50,
     "eval_iters": 50,
     "log_interval": 50,
     "save_checkpoint": true,
     "seed": 1,
-    "device": "cpu",
+    "device": "cuda",
     "dtype": "float32",
-    "batch_size": 32,
+    "batch_size": 256,
     "block_size": 256,
     "max_iters": 2000,
     "learning_rate": 0.0003,
@@ -19,12 +19,11 @@
     "n_embd": 128,
     "dropout": 0.1,
     "bias": true,
-    "early_stopping": true,
-    "early_stopping_patience": 4,
-    "early_stopping_min_delta": 0.0,
-    "early_stopping_min_evals": 3,
+    "val_threshold_stopping": true,
+    "val_loss_threshold": 2.4,
+    "val_threshold_min_evals": 1,
     "codecarbon_offline": true,
-    "country_iso_code": "SWE"
+    "country_iso_code": "DNK"
   },
   "invariants": {
     "data_dir": "data",
@@ -39,34 +38,98 @@
       "overrides": {}
     },
     {
-      "id": "train_model_smaller",
-      "description": "Smaller model for compute/emissions comparison.",
+      "id": "train_arch_iso_l2_e184",
+      "description": "Iso-parameter architecture sweep point (shallower, wider; recalibrated to measured param counts).",
       "overrides": {
         "n_layer": 2,
-        "n_embd": 96
+        "n_embd": 184,
+        "batch_size": 288
       }
     },
     {
-      "id": "train_model_larger",
-      "description": "Larger model for compute/emissions comparison.",
+      "id": "train_arch_iso_l3_e144",
+      "description": "Iso-parameter architecture sweep point (moderately shallow, wider; recalibrated to measured param counts).",
+      "overrides": {
+        "n_layer": 3,
+        "n_embd": 144,
+        "batch_size": 256
+      }
+    },
+    {
+      "id": "train_arch_iso_l5_e112",
+      "description": "Iso-parameter architecture sweep point (deeper, narrower; recalibrated to measured param counts).",
+      "overrides": {
+        "n_layer": 5,
+        "n_embd": 112,
+        "batch_size": 192
+      }
+    },
+    {
+      "id": "train_arch_iso_l6_e104",
+      "description": "Iso-parameter architecture sweep point (deeper, narrower; recalibrated to measured param counts).",
       "overrides": {
         "n_layer": 6,
-        "n_embd": 192
+        "n_embd": 104,
+        "batch_size": 176
       }
     },
     {
-      "id": "train_blocksize_128",
-      "description": "Shorter context window with fixed other defaults.",
+      "id": "train_arch_iso_l7_e96",
+      "description": "Iso-parameter architecture sweep point (deepest, narrowest; recalibrated to measured param counts).",
       "overrides": {
-        "block_size": 128
+        "n_layer": 7,
+        "n_embd": 96,
+        "batch_size": 160
+      }
+    },
+    {
+      "id": "train_dtype_float16",
+      "description": "Mixed precision fp16 training for memory/throughput comparison.",
+      "overrides": {
+        "dtype": "float16",
+        "device": "cuda",
+        "batch_size": 320
       }
     },
     {
       "id": "train_dtype_bfloat16",
-      "description": "Mixed precision scenario (requires CUDA bfloat16 support).",
+      "description": "Mixed precision bfloat16 training for memory/throughput comparison.",
       "overrides": {
         "dtype": "bfloat16",
-        "device": "cuda"
+        "device": "cuda",
+        "batch_size": 288
+      }
+    },
+    {
+      "id": "train_blocksize_128",
+      "description": "Shorter context with larger batch to keep GPU utilization high.",
+      "overrides": {
+        "block_size": 128,
+        "batch_size": 640
+      }
+    },
+    {
+      "id": "train_blocksize_192",
+      "description": "Medium-short context with adjusted batch for similar VRAM usage.",
+      "overrides": {
+        "block_size": 192,
+        "batch_size": 352
+      }
+    },
+    {
+      "id": "train_blocksize_320",
+      "description": "Longer context with reduced batch for similar VRAM usage.",
+      "overrides": {
+        "block_size": 320,
+        "batch_size": 160
+      }
+    },
+    {
+      "id": "train_blocksize_384",
+      "description": "Longest context sweep point with reduced batch for VRAM control.",
+      "overrides": {
+        "block_size": 384,
+        "batch_size": 112
       }
     },
     {
