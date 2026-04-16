@@ -144,6 +144,59 @@ def _apply_inference_checkpoint(
     return merged_config, None
 
 
+def _validate_inference_comparability(defaults: dict, overrides: dict) -> None:
+    default_length = defaults.get("max_new_tokens")
+    override_length = overrides.get("max_new_tokens", default_length)
+    if override_length != default_length:
+        raise ValueError("Inference comparability guard: max_new_tokens must remain fixed across predefined scenarios.")
+
+
+def _merge_scenario_config(
+    *,
+    phase: str,
+    scenario_id: str,
+    defaults: dict,
+    overrides: dict,
+    checkpoint_path: str | None,
+) -> tuple[dict | None, str | None]:
+    if phase == "inference":
+        _validate_inference_comparability(defaults, overrides)
+
+    merged = {**defaults, **overrides}
+    if phase != "inference":
+        return merged, None
+
+    return _apply_inference_checkpoint(
+        merged=merged,
+        phase=phase,
+        scenario_id=scenario_id,
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def _config_to_cli_args(config: dict) -> list[str]:
+    args: list[str] = []
+    for key, value in config.items():
+        flag = f"--{key.replace('_', '-')}"
+        args.extend([flag, str(value)])
+    return args
+
+
+def _write_runner_log(run_dir: Path, stdout: str, stderr: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with (run_dir / "runner.log").open("w", encoding="utf-8") as f:
+        if stdout:
+            f.write(stdout)
+        if stderr:
+            f.write("\n[stderr]\n")
+            f.write(stderr)
+
+
+def _run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    print("Running:", " ".join(cmd))
+    return subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False, capture_output=True, text=True)
+
+
 def build_command(
     phase: str,
     scenario_id: str,
@@ -155,32 +208,21 @@ def build_command(
     defaults = phase_config.get("defaults", {})
     overrides = scenario.get("overrides", {})
 
-    if phase == "inference":
-        default_length = defaults.get("max_new_tokens")
-        override_length = overrides.get("max_new_tokens", default_length)
-        if override_length != default_length:
-            raise ValueError(
-                "Inference comparability guard: max_new_tokens must remain fixed across predefined scenarios."
-            )
-
-    merged = {**defaults, **overrides}
-    if phase == "inference":
-        merged, skip_reason = _apply_inference_checkpoint(
-            merged=merged,
-            phase=phase,
-            scenario_id=scenario_id,
-            checkpoint_path=checkpoint_path,
-        )
-        if merged is None:
-            return None, skip_reason
+    merged, skip_reason = _merge_scenario_config(
+        phase=phase,
+        scenario_id=scenario_id,
+        defaults=defaults,
+        overrides=overrides,
+        checkpoint_path=checkpoint_path,
+    )
+    if merged is None:
+        return None, skip_reason
 
     cmd = [sys.executable, str(SCRIPT_BY_PHASE[phase]), "--scenario-id", scenario_id]
     if run_id:
         cmd.extend(["--run-id", run_id])
 
-    for key, value in merged.items():
-        flag = f"--{key.replace('_', '-')}"
-        cmd.extend([flag, str(value)])
+    cmd.extend(_config_to_cli_args(merged))
 
     if extra:
         cmd.extend(extra)
@@ -207,17 +249,10 @@ def run_one(
         print(f"Warning: Skipping {phase}:{scenario_id} ({skip_reason})")
         return 0
 
-    print("Running:", " ".join(cmd))
-    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=False, capture_output=True, text=True)
+    result = _run_command(cmd)
 
     run_dir = scenario_runs_dir(phase, scenario_id) / resolved_run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with (run_dir / "runner.log").open("w", encoding="utf-8") as f:
-        if result.stdout:
-            f.write(result.stdout)
-        if result.stderr:
-            f.write("\n[stderr]\n")
-            f.write(result.stderr)
+    _write_runner_log(run_dir, result.stdout, result.stderr)
 
     if result.stdout:
         print(result.stdout)
