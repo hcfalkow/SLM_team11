@@ -3,12 +3,16 @@
 import csv
 import json
 import subprocess
+import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 from codecarbon import EmissionsTracker, OfflineEmissionsTracker
+
+T = TypeVar("T")
 
 
 def parse_bool(value: str) -> bool:
@@ -58,6 +62,24 @@ def load_emissions_metrics(emissions_csv: Path) -> dict[str, float | None]:
     energy_kwh = float(last_row["energy_consumed"]) if last_row.get("energy_consumed") else None
     emissions_kg = float(last_row["emissions"]) if last_row.get("emissions") else None
     return {"energy_kwh": energy_kwh, "emissions_kg": emissions_kg}
+
+
+def load_emissions_metrics_total(emissions_csv: Path) -> dict[str, float | None]:
+    if not emissions_csv.exists():
+        return {"energy_kwh": None, "emissions_kg": None}
+
+    with emissions_csv.open("r", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return {"energy_kwh": None, "emissions_kg": None}
+
+    energy_values = [float(row["energy_consumed"]) for row in rows if row.get("energy_consumed")]
+    emissions_values = [float(row["emissions"]) for row in rows if row.get("emissions")]
+
+    return {
+        "energy_kwh": sum(energy_values) if energy_values else None,
+        "emissions_kg": sum(emissions_values) if emissions_values else None,
+    }
 
 
 def collect_model_stats(model: torch.nn.Module) -> dict[str, int | float]:
@@ -120,6 +142,33 @@ def build_tracker(
     if offline:
         return OfflineEmissionsTracker(country_iso_code=country_iso_code, **tracker_kwargs)
     return EmissionsTracker(**tracker_kwargs)
+
+
+def run_stage_with_tracker(
+    *,
+    project_name: str,
+    output_dir: Path,
+    output_file: str,
+    offline: bool,
+    country_iso_code: str,
+    fn: Callable[[], T],
+) -> tuple[T, float]:
+    tracker = build_tracker(
+        project_name=project_name,
+        output_dir=output_dir,
+        output_file=output_file,
+        offline=offline,
+        country_iso_code=country_iso_code,
+    )
+
+    start = time.time()
+    tracker.start()
+    try:
+        result = fn()
+    finally:
+        tracker.stop()
+
+    return result, time.time() - start
 
 
 def reset_cuda_peak_memory(device: str) -> None:

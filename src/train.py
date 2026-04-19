@@ -14,14 +14,14 @@ from model import GPT, GPTConfig
 from paths import DATA_DIR, OUT_DIR, SUMMARY_DIR, make_run_dir, scenario_runs_dir
 from run_common import (
     append_row,
-    build_tracker,
     collect_model_stats,
     cuda_memory_stats,
     get_git_commit,
-    load_emissions_metrics,
+    load_emissions_metrics_total,
     make_amp_ctx_factory,
     parse_bool,
     reset_cuda_peak_memory,
+    run_stage_with_tracker,
     write_json,
 )
 
@@ -56,6 +56,13 @@ DEFAULT_GRAD_CLIP = 1.0
 DEFAULT_VAL_THRESHOLD_STOPPING = True
 DEFAULT_VAL_LOSS_THRESHOLD = 2.3
 DEFAULT_VAL_THRESHOLD_MIN_EVALS = 1
+
+TRAIN_STAGE_DEFINITIONS = {
+    "tr1_setup_init": "Setup and initialization",
+    "tr2_core_training_compute": "Core training compute",
+    "tr3_periodic_evaluation_control": "Periodic evaluation and control",
+    "tr4_finalization_artifact_write": "Finalization and artifact write",
+}
 
 # -----------------------------------------------------------------------------
 
@@ -213,6 +220,8 @@ def run_training_loop(
     amp_ctx_factory,
     metrics_csv: Path,
     checkpoint_path: Path,
+    run_stage_train_compute,
+    run_stage_eval_control,
 ) -> dict[str, object]:
     training_tokens_processed = 0
     eval_tokens_processed = 0
@@ -224,78 +233,110 @@ def run_training_loop(
 
     t0 = time.time()
     last_iter = 0
-    for it in range(args.max_iters + 1):
-        last_iter = it
+    it = 0
+
+    while it <= args.max_iters:
         if it % args.eval_interval == 0:
-            with amp_ctx_factory():
-                losses = estimate_loss(model, data_dir, args.block_size, args.batch_size, args.device, args.eval_iters)
+
+            def eval_stage_step() -> tuple[dict[str, float], float, int, bool, str | None]:
+                with amp_ctx_factory():
+                    losses = estimate_loss(
+                        model,
+                        data_dir,
+                        args.block_size,
+                        args.batch_size,
+                        args.device,
+                        args.eval_iters,
+                    )
+
+                elapsed_s = time.time() - t0
+                print(
+                    f"iter {it:5d} | train loss {losses['train']:.4f} | "
+                    f"val loss {losses['val']:.4f} | elapsed {elapsed_s:.1f}s"
+                )
+
+                threshold_reached = losses["val"] <= args.val_loss_threshold
+                next_best_val_loss = best_val_loss
+                next_best_iter = best_iter
+                if losses["val"] < next_best_val_loss:
+                    next_best_val_loss = losses["val"]
+                    next_best_iter = it
+
+                append_row(
+                    metrics_csv,
+                    {
+                        "iter": it,
+                        "train_loss": losses["train"],
+                        "val_loss": losses["val"],
+                        "elapsed_seconds": round(elapsed_s, 4),
+                        "best_val_loss": next_best_val_loss,
+                        "best_iter": next_best_iter,
+                        "val_loss_threshold": args.val_loss_threshold,
+                        "threshold_reached": threshold_reached,
+                    },
+                )
+
+                if args.save_checkpoint and it > 0:
+                    save_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        it,
+                        build_checkpoint_config(args=args, data_dir=data_dir, cfg=cfg, run_id=run_id),
+                    )
+
+                stage_stop_reason = None
+                should_stop = (
+                    args.val_threshold_stopping
+                    and eval_count + 1 >= args.val_threshold_min_evals
+                    and threshold_reached
+                    and it > 0
+                )
+                if should_stop:
+                    stage_stop_reason = (
+                        f"validation_threshold_reached(val_loss={losses['val']:.6f}, "
+                        f"threshold={args.val_loss_threshold}, min_evals={args.val_threshold_min_evals})"
+                    )
+
+                return losses, next_best_val_loss, next_best_iter, should_stop, stage_stop_reason
+
+            losses, best_val_loss, best_iter, should_stop, stage_stop_reason = run_stage_eval_control(eval_stage_step)
 
             eval_tokens_processed += 2 * args.eval_iters * args.batch_size * args.block_size
-            elapsed_s = time.time() - t0
-            print(
-                f"iter {it:5d} | train loss {losses['train']:.4f} | "
-                f"val loss {losses['val']:.4f} | elapsed {elapsed_s:.1f}s"
-            )
             eval_count += 1
             last_eval_losses = losses
 
-            if losses["val"] < best_val_loss:
-                best_val_loss = losses["val"]
-                best_iter = it
-
-            threshold_reached = losses["val"] <= args.val_loss_threshold
-
-            append_row(
-                metrics_csv,
-                {
-                    "iter": it,
-                    "train_loss": losses["train"],
-                    "val_loss": losses["val"],
-                    "elapsed_seconds": round(elapsed_s, 4),
-                    "best_val_loss": best_val_loss,
-                    "best_iter": best_iter,
-                    "val_loss_threshold": args.val_loss_threshold,
-                    "threshold_reached": threshold_reached,
-                },
-            )
-
-            if args.save_checkpoint and it > 0:
-                save_checkpoint(
-                    checkpoint_path,
-                    model,
-                    optimizer,
-                    it,
-                    build_checkpoint_config(args=args, data_dir=data_dir, cfg=cfg, run_id=run_id),
-                )
-
-            if (
-                args.val_threshold_stopping
-                and eval_count >= args.val_threshold_min_evals
-                and threshold_reached
-                and it > 0
-            ):
-                stop_reason = (
-                    f"validation_threshold_reached(val_loss={losses['val']:.6f}, "
-                    f"threshold={args.val_loss_threshold}, min_evals={args.val_threshold_min_evals})"
-                )
+            if should_stop:
+                stop_reason = str(stage_stop_reason)
+                last_iter = it
                 print(f"Stopping early at iter {it}: {stop_reason}")
                 break
 
-        x, y = get_batch("train", data_dir, args.block_size, args.batch_size, args.device)
-        with amp_ctx_factory():
-            _, loss = model(x, y)
+        next_eval_it = min(((it // args.eval_interval) + 1) * args.eval_interval, args.max_iters + 1)
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        def train_stage_block() -> int:
+            nonlocal training_tokens_processed
+            for train_it in range(it, next_eval_it):
+                x, y = get_batch("train", data_dir, args.block_size, args.batch_size, args.device)
+                with amp_ctx_factory():
+                    _, loss = model(x, y)
 
-        if args.grad_clip and args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
 
-        optimizer.step()
-        training_tokens_processed += args.batch_size * args.block_size
+                if args.grad_clip and args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
-        if it % args.log_interval == 0:
-            print(f"iter {it:5d} | loss {loss.item():.4f}")
+                optimizer.step()
+                training_tokens_processed += args.batch_size * args.block_size
+
+                if train_it % args.log_interval == 0:
+                    print(f"iter {train_it:5d} | loss {loss.item():.4f}")
+
+            return next_eval_it - 1
+
+        last_iter = run_stage_train_compute(train_stage_block)
+        it = next_eval_it
 
     return {
         "runtime_seconds": time.time() - t0,
@@ -320,50 +361,72 @@ def main():
     scenario_dir = scenario_runs_dir("train", args.scenario_id)
     metrics_csv = run_dir / "train_metrics.csv"
     checkpoint_path = run_dir / "ckpt.pt"
-    emissions_csv = run_dir / "emissions.csv"
 
-    data_dir = Path(args.data_dir)
-    set_seed(args.seed)
+    stage_order = list(TRAIN_STAGE_DEFINITIONS.keys())
+    stage_emissions_files = {stage_id: run_dir / f"emissions_{stage_id}.csv" for stage_id in stage_order}
+    stage_runtime_seconds = dict.fromkeys(stage_order, 0.0)
 
-    meta = load_meta(data_dir)
-    vocab_size = meta["vocab_size"] if meta and "vocab_size" in meta else 50304
+    def run_stage(stage_id: str, fn):
+        result, duration_s = run_stage_with_tracker(
+            project_name=f"train_{args.scenario_id}_{stage_id}",
+            output_dir=run_dir,
+            output_file=stage_emissions_files[stage_id].name,
+            offline=args.codecarbon_offline,
+            country_iso_code=args.country_iso_code,
+            fn=fn,
+        )
+        stage_runtime_seconds[stage_id] += duration_s
+        return result
 
-    cfg = GPTConfig(
-        block_size=args.block_size,
-        vocab_size=vocab_size,
-        n_layer=args.n_layer,
-        n_head=args.n_head,
-        n_embd=args.n_embd,
-        dropout=args.dropout,
-        bias=args.bias,
-    )
+    def setup_stage():
+        data_dir = Path(args.data_dir)
+        set_seed(args.seed)
 
-    # create the model and move it to the device
-    model = GPT(cfg).to(args.device)
-    model_stats = collect_model_stats(model)
-    amp_ctx_factory = make_amp_ctx_factory(args.device, args.dtype)
+        meta = load_meta(data_dir)
+        vocab_size = meta["vocab_size"] if meta and "vocab_size" in meta else 50304
 
-    # create the optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-        betas=(0.9, 0.95),
-    )
+        cfg = GPTConfig(
+            block_size=args.block_size,
+            vocab_size=vocab_size,
+            n_layer=args.n_layer,
+            n_head=args.n_head,
+            n_embd=args.n_embd,
+            dropout=args.dropout,
+            bias=args.bias,
+        )
 
-    write_json(run_dir / "effective_config.json", build_effective_config(args, run_id, data_dir, cfg))
+        model = GPT(cfg).to(args.device)
+        model_stats = collect_model_stats(model)
+        amp_ctx_factory = make_amp_ctx_factory(args.device, args.dtype)
 
-    tracker = build_tracker(
-        project_name=f"train_{args.scenario_id}",
-        output_dir=run_dir,
-        output_file=emissions_csv.name,
-        offline=args.codecarbon_offline,
-        country_iso_code=args.country_iso_code,
-    )
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+            betas=(0.9, 0.95),
+        )
+
+        write_json(run_dir / "effective_config.json", build_effective_config(args, run_id, data_dir, cfg))
+
+        return {
+            "data_dir": data_dir,
+            "cfg": cfg,
+            "model": model,
+            "model_stats": model_stats,
+            "amp_ctx_factory": amp_ctx_factory,
+            "optimizer": optimizer,
+        }
+
+    setup_state = run_stage("tr1_setup_init", setup_stage)
+    data_dir = setup_state["data_dir"]
+    cfg = setup_state["cfg"]
+    model = setup_state["model"]
+    model_stats = setup_state["model_stats"]
+    amp_ctx_factory = setup_state["amp_ctx_factory"]
+    optimizer = setup_state["optimizer"]
 
     reset_cuda_peak_memory(args.device)
 
-    tracker.start()
     training_result = run_training_loop(
         args=args,
         run_id=run_id,
@@ -374,11 +437,25 @@ def main():
         amp_ctx_factory=amp_ctx_factory,
         metrics_csv=metrics_csv,
         checkpoint_path=checkpoint_path,
+        run_stage_train_compute=lambda fn: run_stage("tr2_core_training_compute", fn),
+        run_stage_eval_control=lambda fn: run_stage("tr3_periodic_evaluation_control", fn),
     )
-    tracker.stop()
+
+    def finalization_stage() -> None:
+        if args.save_checkpoint:
+            save_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                int(training_result["last_iter"]),
+                build_checkpoint_config(args=args, data_dir=data_dir, cfg=cfg, run_id=run_id),
+            )
+
+    run_stage("tr4_finalization_artifact_write", finalization_stage)
     print("Training completed.")
 
-    runtime_seconds = float(training_result["runtime_seconds"])
+    training_loop_runtime_seconds = float(training_result["runtime_seconds"])
+    runtime_seconds = float(sum(stage_runtime_seconds.values()))
     last_iter = int(training_result["last_iter"])
     best_val_loss = float(training_result["best_val_loss"])
     best_iter = int(training_result["best_iter"])
@@ -388,21 +465,31 @@ def main():
     training_tokens_processed = int(training_result["training_tokens_processed"])
     eval_tokens_processed = int(training_result["eval_tokens_processed"])
 
-    # Save final checkpoint
-    if args.save_checkpoint:
-        save_checkpoint(
-            checkpoint_path,
-            model,
-            optimizer,
-            last_iter,
-            build_checkpoint_config(args=args, data_dir=data_dir, cfg=cfg, run_id=run_id),
-        )
-
     checkpoint_size_bytes = checkpoint_path.stat().st_size if checkpoint_path.exists() else None
     checkpoint_size_mb = round(checkpoint_size_bytes / (1024**2), 4) if checkpoint_size_bytes is not None else None
     gpu_memory = cuda_memory_stats(args.device)
 
-    emissions_metrics = load_emissions_metrics(emissions_csv)
+    stage_metrics = {}
+    for stage_id in stage_order:
+        stage_totals = load_emissions_metrics_total(stage_emissions_files[stage_id])
+        stage_metrics[stage_id] = {
+            "label": TRAIN_STAGE_DEFINITIONS[stage_id],
+            "runtime_seconds": round(stage_runtime_seconds[stage_id], 4),
+            "energy_kwh": stage_totals["energy_kwh"],
+            "emissions_kg": stage_totals["emissions_kg"],
+            "emissions_csv": str(stage_emissions_files[stage_id]),
+        }
+
+    total_energy_values = [
+        stage_metrics[s]["energy_kwh"] for s in stage_order if stage_metrics[s]["energy_kwh"] is not None
+    ]
+    total_emissions_values = [
+        stage_metrics[s]["emissions_kg"] for s in stage_order if stage_metrics[s]["emissions_kg"] is not None
+    ]
+    emissions_metrics = {
+        "energy_kwh": sum(total_energy_values) if total_energy_values else None,
+        "emissions_kg": sum(total_emissions_values) if total_emissions_values else None,
+    }
 
     run_metadata = {
         "phase": "train",
@@ -413,6 +500,7 @@ def main():
         "status": "completed",
         "stop_reason": stop_reason,
         "runtime_seconds": runtime_seconds,
+        "training_loop_runtime_seconds": training_loop_runtime_seconds,
         "device": args.device,
         "dtype": args.dtype,
         "model": asdict(cfg),
@@ -453,11 +541,15 @@ def main():
             "energy_kwh": emissions_metrics["energy_kwh"],
             "emissions_kg": emissions_metrics["emissions_kg"],
         },
+        "lifecycle_stages": {
+            "order": stage_order,
+            "metrics": stage_metrics,
+        },
         "artifacts": {
             "run_dir": str(run_dir),
             "checkpoint_path": str(checkpoint_path),
             "metrics_csv": str(metrics_csv),
-            "emissions_csv": str(emissions_csv),
+            "stage_emissions_csv": {stage_id: str(path) for stage_id, path in stage_emissions_files.items()},
             "effective_config_json": str(run_dir / "effective_config.json"),
         },
     }
@@ -511,6 +603,30 @@ def main():
             "emissions_kg": emissions_metrics["emissions_kg"],
             "total_tokens_processed": training_tokens_processed + eval_tokens_processed,
             "checkpoint_path": str(checkpoint_path),
+        },
+    )
+
+    append_row(
+        SUMMARY_DIR / "train_stage_summary.csv",
+        {
+            "scenario_id": args.scenario_id,
+            "run_id": run_id,
+            "timestamp_utc": run_metadata["timestamp_utc"],
+            "runtime_seconds_total": round(runtime_seconds, 4),
+            "runtime_seconds_tr1": stage_metrics["tr1_setup_init"]["runtime_seconds"],
+            "runtime_seconds_tr2": stage_metrics["tr2_core_training_compute"]["runtime_seconds"],
+            "runtime_seconds_tr3": stage_metrics["tr3_periodic_evaluation_control"]["runtime_seconds"],
+            "runtime_seconds_tr4": stage_metrics["tr4_finalization_artifact_write"]["runtime_seconds"],
+            "energy_kwh_total": emissions_metrics["energy_kwh"],
+            "energy_kwh_tr1": stage_metrics["tr1_setup_init"]["energy_kwh"],
+            "energy_kwh_tr2": stage_metrics["tr2_core_training_compute"]["energy_kwh"],
+            "energy_kwh_tr3": stage_metrics["tr3_periodic_evaluation_control"]["energy_kwh"],
+            "energy_kwh_tr4": stage_metrics["tr4_finalization_artifact_write"]["energy_kwh"],
+            "emissions_kg_total": emissions_metrics["emissions_kg"],
+            "emissions_kg_tr1": stage_metrics["tr1_setup_init"]["emissions_kg"],
+            "emissions_kg_tr2": stage_metrics["tr2_core_training_compute"]["emissions_kg"],
+            "emissions_kg_tr3": stage_metrics["tr3_periodic_evaluation_control"]["emissions_kg"],
+            "emissions_kg_tr4": stage_metrics["tr4_finalization_artifact_write"]["emissions_kg"],
         },
     )
 

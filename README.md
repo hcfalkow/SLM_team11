@@ -25,14 +25,14 @@ The goal of the case study is **not to optimize model performance**, but to unde
 
 ---
 
-## Create a new environment for this project
-To create a new environment, in the project directory run:
+## Sync the environment for this project
+To create a new projet environment, in the project directory run:
 ```bash
-conda env create -f env_requirements.yaml
+uv sync --locked --dev
 ```
-To activate it:
+For running python scripts, you should use:
 ```bash
-conda activate slm-sustainability
+uv run script.py
 ```
 
 ## General workflow
@@ -135,7 +135,14 @@ These parameters are the **main levers** you should use for:
 
 ### Where to implement CodeCarbon (training)
 
-CodeCarbon is integrated around the training scope (including periodic validation) to measure:
+CodeCarbon is integrated with stage-split tracking for the training lifecycle:
+
+- TR1: setup and initialization
+- TR2: core training compute
+- TR3: periodic evaluation and control
+- TR4: finalization and artifact write
+
+Per-stage energy and emissions are logged separately and aggregated in run metadata.
 
 - Energy consumption  
 - CO₂-equivalent emissions during training  
@@ -183,10 +190,14 @@ These parameters control the **inference workload**, which is essential for:
 
 ### Where to implement CodeCarbon (inference)
 
-CodeCarbon is integrated around the generation scope (not checkpoint/model loading) to measure:
+CodeCarbon is integrated with stage-split tracking for the inference lifecycle:
 
-- Energy and emissions per prompt  
-- Energy and emissions as a function of generated tokens  
+- IN1: load and prepare
+- IN2: input processing
+- IN3: generation compute
+- IN4: postprocess and persist
+
+Per-stage energy and emissions are logged separately and aggregated in run metadata.
 
 ---
 
@@ -255,7 +266,7 @@ Each scenario run produces machine-readable artifacts:
 
 - `effective_config.json`
 - `run_metadata.json`
-- `emissions.csv`
+- `emissions_<stage_id>.csv` (one per lifecycle stage)
 - `train_metrics.csv` (training only)
 - `generated_outputs.jsonl` (inference only)
 - `ckpt.pt` (training only)
@@ -264,6 +275,8 @@ Aggregate CSV tables are appended to:
 
 - `out/scenario_summaries/train_summary.csv`
 - `out/scenario_summaries/inference_summary.csv`
+- `out/scenario_summaries/train_stage_summary.csv`
+- `out/scenario_summaries/inference_stage_summary.csv`
 
 These summaries combine configuration, runtime, workload size, and energy/emissions values.
 

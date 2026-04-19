@@ -5,7 +5,7 @@
     "device": "cuda",
     "dtype": "float32",
     "context_window": 0,
-    "max_new_tokens": 200,
+    "max_new_tokens": 5000,
     "temperature": 1.0,
     "top_k": 50,
     "prompt_workload_file": "scenarios/prompts.txt",
